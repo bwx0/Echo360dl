@@ -192,9 +192,15 @@ def download_transcript(lesson):
     return transcript_data
 
 
-def _merge_tracks_and_save(audio_path, video_path, course_name, lesson_name):
+def _ensure_video_dir(course_name, lesson_name):
     file_name = replace_non_alphanumeric(lesson_name)
     out_vid_path = videos_dir.replace("{course_name}", course_name).replace("{lesson_name}", file_name)
+    pathlib.Path(out_vid_path).parent.mkdir(parents=True, exist_ok=True)
+    return out_vid_path
+
+
+def _merge_tracks_and_save(audio_path, video_path, course_name, lesson_name):
+    out_vid_path = _ensure_video_dir(course_name, lesson_name)
 
     command = [
         "ffmpeg",
@@ -230,6 +236,8 @@ def download_lesson_video(lesson):
     playableMedias = lesson["video"]["playableMedias"]
     targets: List[Tuple[Any, int, str]] = []  # (obj, max_quality, track_type)
     track_found = set()
+    full_video_url = None
+    fallback_to_full_video = False
 
     # Find the media file that contains either video track or audio track.
     # Media that claims to have both does not actually have both.
@@ -241,9 +249,15 @@ def download_lesson_video(lesson):
         if len(trackType) == 1 and track_type not in track_found:
             targets.append((media, max_quality, track_type))  # Keep the one of best quality
             track_found.add(track_type)
+        if len(trackType) == 2 and full_video_url is None:
+            full_video_url = media["uri"]
 
-    assert len(targets) == 2, "Expect 2 m4s files (audio and video track respectively)"
-    assert "audio" in track_found and "video" in track_found, "Expect both audio and video tracks"
+    if full_video_url is None:
+        assert len(targets) == 2, "Expect 2 m4s files (audio and video track respectively)"
+        assert "audio" in track_found and "video" in track_found, "Expect both audio and video tracks"
+    elif len(targets) != 2:
+        targets = []
+        fallback_to_full_video = True
 
     # For each of the audio and video track, save them as a tmp file.
     for media, max_quality, track_type in targets:
@@ -266,15 +280,37 @@ def download_lesson_video(lesson):
         # The second level m3u8 file contains the relative link to a m4s file. Extract that link.
         m2_source = api.fetch_text(second_level_m3u8)
         m4s_list = list(set([line for line in m2_source.splitlines() if line.endswith(".m4s")]))
-        assert len(m4s_list) == 1, f"Expect 1 m4s file within an m3u8 file, got {len(m4s_list)}"
+        if len(m4s_list) > 0:  # old version
+            assert len(m4s_list) == 1, f"Expect 1 m4s file within an m3u8 file, got {len(m4s_list)}"
 
-        # Combine the relative link with the base url to get the full url of the m4s file.
-        url_parts[-1] = m4s_list[0]
-        url_ultimate = ''.join(url_parts)
+            # Combine the relative link with the base url to get the full url of the m4s file.
+            url_parts[-1] = m4s_list[0]
+            url_ultimate = ''.join(url_parts)
 
-        # Save the audio/video track as a tmp m4s file.
-        print("URL: " + url_ultimate)
-        api.download_file(url_ultimate, f"{track_type}.tmp.m4s")
+            # Save the audio/video track as a tmp m4s file.
+            print("URL: " + url_ultimate)
+            api.download_file(url_ultimate, f"{track_type}.tmp.m4s")
+        else:
+            print("m3u8 file contains no m4s files. Falling back to full video download.")
+            fallback_to_full_video = True
+            break
+
+    if fallback_to_full_video:
+        out_vid_path = _ensure_video_dir(course_name, lesson_name)
+        command = [
+            "ffmpeg",
+            '-loglevel', 'warning',  # suppress output
+            '-headers', ''.join(f'{k}: {v}\r\n' for k, v in api.get_request_headers_with_cookie().items()),
+            "-i", full_video_url,
+            "-c", "copy",
+            out_vid_path
+        ]
+        try:
+            subprocess.run(command, check=True)
+            print(f"Video saved successfully as {out_vid_path}")
+        except subprocess.CalledProcessError:
+            print("An error occurred while saving the video.")
+        return
 
     # Now we have m4s files for audio and video tracks. Merge them and save to the video folder.
     _merge_tracks_and_save("audio.tmp.m4s", "video.tmp.m4s", course_name, lesson_name)

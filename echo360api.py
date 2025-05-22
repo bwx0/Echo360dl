@@ -30,6 +30,12 @@ def get_request_headers() -> Dict[str, str]:
     return headers
 
 
+def get_request_headers_with_cookie() -> Dict[str, str]:
+    headers = get_request_headers()
+    headers["Cookie"] = cookie_string
+    return headers
+
+
 def fetch(url: str) -> Response:
     response = requests.get(url, headers=get_request_headers(), cookies=get_request_cookies())
     if response.status_code == 200:
